@@ -5,8 +5,74 @@ import os
 import re
 from typing import Dict, Any, List, Optional
 import logging
+import json
 
 logger = logging.getLogger(__name__)
+
+# Maximum path length to prevent issues
+MAX_PATH_LENGTH = 4096
+
+
+def normalize_path(path: str) -> str:
+    """
+    Normalize file path to use forward slashes and handle edge cases.
+    
+    Args:
+        path: File path to normalize
+        
+    Returns:
+        Normalized path with forward slashes
+    """
+    if not path:
+        return ""
+    
+    # Replace backslashes with forward slashes for consistency
+    normalized = path.replace("\\", "/")
+    
+    # Remove duplicate slashes
+    normalized = re.sub(r'/+', '/', normalized)
+    
+    # Validate path length
+    if len(normalized) > MAX_PATH_LENGTH:
+        logger.warning(f"Path exceeds maximum length: {normalized[:100]}...")
+        normalized = normalized[:MAX_PATH_LENGTH]
+    
+    return normalized
+
+
+def safe_get_content(file_dict: Dict[str, Any]) -> Optional[str]:
+    """
+    Safely extract content from file dictionary with validation.
+    
+    Args:
+        file_dict: File dictionary that may contain content
+        
+    Returns:
+        File content as string or None if invalid
+    """
+    if not file_dict or not isinstance(file_dict, dict):
+        return None
+    
+    content = file_dict.get("content")
+    
+    # Handle None or empty content
+    if content is None or content == "":
+        return None
+    
+    # Ensure content is a string
+    if not isinstance(content, str):
+        try:
+            content = str(content)
+        except Exception as e:
+            logger.warning(f"Failed to convert content to string: {e}")
+            return None
+    
+    # Check for binary content indicators
+    if '\x00' in content:
+        logger.warning("Binary content detected, skipping")
+        return None
+    
+    return content
 
 
 def extract_project_overview(files: List[Dict[str, Any]]) -> str:
@@ -19,66 +85,103 @@ def extract_project_overview(files: List[Dict[str, Any]]) -> str:
     Returns:
         Markdown string with project overview
     """
+    # Validate input
+    if not files or not isinstance(files, list) or len(files) == 0:
+        return "### Project Overview\n\nNo files available for analysis.\n\n"
+    
     overview_parts = []
     
     # Find and parse README
-    readme_file = next(
-        (f for f in files if f["path"].lower() in ["readme.md", "readme.txt", "readme"]),
-        None
-    )
+    readme_file = None
+    for f in files:
+        if not f or not isinstance(f, dict):
+            continue
+        path = normalize_path(f.get("path", ""))
+        if path.lower() in ["readme.md", "readme.txt", "readme"]:
+            readme_file = f
+            break
     
-    if readme_file and readme_file.get("content"):
-        content = readme_file["content"]
-        # Extract first paragraph or first 500 characters
-        lines = content.split("\n")
-        description = []
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                description.append(line)
-                if len(" ".join(description)) > 500:
-                    break
-        
-        if description:
-            overview_parts.append("### Project Description\n")
-            overview_parts.append(" ".join(description[:3]))
-            overview_parts.append("\n\n")
+    if readme_file:
+        content = safe_get_content(readme_file)
+        if content:
+            try:
+                # Extract first paragraph or first 500 characters
+                lines = content.split("\n")
+                description = []
+                for line in lines:
+                    line = line.strip()
+                    # Skip empty lines and headers
+                    if line and not line.startswith("#"):
+                        description.append(line)
+                        if len(" ".join(description)) > 500:
+                            break
+                
+                if description:
+                    overview_parts.append("### Project Description\n")
+                    overview_parts.append(" ".join(description[:3]))
+                    overview_parts.append("\n\n")
+            except Exception as e:
+                logger.warning(f"Error parsing README: {e}")
     
     # Check for package.json (Node.js project)
-    package_json = next(
-        (f for f in files if f["path"] == "package.json"),
-        None
-    )
+    package_json = None
+    for f in files:
+        if not f or not isinstance(f, dict):
+            continue
+        if normalize_path(f.get("path", "")) == "package.json":
+            package_json = f
+            break
     
-    if package_json and package_json.get("content"):
-        try:
-            import json
-            data = json.loads(package_json["content"])
-            overview_parts.append("### Technology Stack\n")
-            overview_parts.append(f"- **Type**: Node.js/JavaScript Project\n")
-            if data.get("description"):
-                overview_parts.append(f"- **Description**: {data['description']}\n")
-            if data.get("dependencies"):
-                deps = list(data["dependencies"].keys())[:5]
-                overview_parts.append(f"- **Key Dependencies**: {', '.join(deps)}\n")
-            overview_parts.append("\n")
-        except Exception as e:
-            logger.warning(f"Failed to parse package.json: {e}")
+    if package_json:
+        content = safe_get_content(package_json)
+        if content:
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    overview_parts.append("### Technology Stack\n")
+                    overview_parts.append(f"- **Type**: Node.js/JavaScript Project\n")
+                    if data.get("description"):
+                        desc = str(data["description"])[:200]  # Limit description length
+                        overview_parts.append(f"- **Description**: {desc}\n")
+                    if data.get("dependencies") and isinstance(data["dependencies"], dict):
+                        deps = list(data["dependencies"].keys())[:5]
+                        overview_parts.append(f"- **Key Dependencies**: {', '.join(deps)}\n")
+                    overview_parts.append("\n")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse package.json: Invalid JSON - {e}")
+            except Exception as e:
+                logger.warning(f"Failed to parse package.json: {e}")
     
     # Check for requirements.txt (Python project)
-    requirements = next(
-        (f for f in files if f["path"] in ["requirements.txt", "pyproject.toml"]),
-        None
-    )
+    requirements = None
+    for f in files:
+        if not f or not isinstance(f, dict):
+            continue
+        path = normalize_path(f.get("path", ""))
+        if path in ["requirements.txt", "pyproject.toml"]:
+            requirements = f
+            break
     
-    if requirements and requirements.get("content"):
-        overview_parts.append("### Technology Stack\n")
-        overview_parts.append(f"- **Type**: Python Project\n")
-        lines = requirements["content"].split("\n")[:5]
-        deps = [line.split("==")[0].split(">=")[0].strip() for line in lines if line.strip() and not line.startswith("#")]
-        if deps:
-            overview_parts.append(f"- **Key Dependencies**: {', '.join(deps)}\n")
-        overview_parts.append("\n")
+    if requirements:
+        content = safe_get_content(requirements)
+        if content:
+            try:
+                overview_parts.append("### Technology Stack\n")
+                overview_parts.append(f"- **Type**: Python Project\n")
+                lines = content.split("\n")[:5]
+                deps = []
+                for line in lines:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        # Safely extract package name
+                        pkg = line.split("==")[0].split(">=")[0].split("<=")[0].strip()
+                        if pkg:
+                            deps.append(pkg)
+                if deps:
+                    overview_parts.append(f"- **Key Dependencies**: {', '.join(deps)}\n")
+                overview_parts.append("\n")
+            except Exception as e:
+                logger.warning(f"Error parsing requirements: {e}")
     
     if not overview_parts:
         overview_parts.append("### Project Overview\n")
@@ -97,6 +200,10 @@ def identify_key_files(files: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     Returns:
         List of dictionaries with path and description
     """
+    # Validate input
+    if not files or not isinstance(files, list) or len(files) == 0:
+        return []
+    
     key_files = []
     
     # Priority patterns for important files
@@ -120,23 +227,46 @@ def identify_key_files(files: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     
     # Score files based on patterns
     scored_files = []
+    seen_paths = set()  # Track duplicate paths
+    
     for file_info in files:
-        path = file_info["path"].lower()
+        # Validate file_info
+        if not file_info or not isinstance(file_info, dict):
+            continue
+        
+        # Get and normalize path
+        raw_path = file_info.get("path")
+        if not raw_path:
+            continue
+        
+        path = normalize_path(raw_path)
+        
+        # Skip duplicates
+        if path in seen_paths:
+            logger.warning(f"Duplicate path detected: {path}")
+            continue
+        seen_paths.add(path)
+        
+        path_lower = path.lower()
         score = 0
         description = None
         
-        # Check priority patterns
-        for pattern, desc in priority_patterns:
-            if re.search(pattern, path, re.IGNORECASE):
-                score = 100
-                description = desc
-                break
+        # Check priority patterns with error handling
+        try:
+            for pattern, desc in priority_patterns:
+                if re.search(pattern, path_lower, re.IGNORECASE):
+                    score = 100
+                    description = desc
+                    break
+        except re.error as e:
+            logger.warning(f"Regex error for path {path}: {e}")
+            continue
         
         # Score by file type and location
         if score == 0:
-            if path.endswith((".py", ".js", ".ts", ".tsx", ".jsx")):
+            if path_lower.endswith((".py", ".js", ".ts", ".tsx", ".jsx")):
                 score = 50
-            if path.endswith((".json", ".yaml", ".yml", ".toml")):
+            if path_lower.endswith((".json", ".yaml", ".yml", ".toml")):
                 score = 40
             if "/" not in path:  # Root level files
                 score += 20
@@ -145,26 +275,40 @@ def identify_key_files(files: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         
         # Generate description if not set
         if not description:
-            filename = os.path.basename(file_info["path"])
-            dirname = os.path.dirname(file_info["path"])
-            
-            if path.endswith(".py"):
-                description = f"Python module in {dirname or 'root'}"
-            elif path.endswith((".js", ".ts", ".tsx", ".jsx")):
-                description = f"JavaScript/TypeScript module in {dirname or 'root'}"
-            elif path.endswith((".json", ".yaml", ".yml")):
-                description = f"Configuration file in {dirname or 'root'}"
-            else:
-                description = f"Source file in {dirname or 'root'}"
+            try:
+                filename = os.path.basename(path)
+                dirname = os.path.dirname(path)
+                
+                if path_lower.endswith(".py"):
+                    description = f"Python module in {dirname or 'root'}"
+                elif path_lower.endswith((".js", ".ts", ".tsx", ".jsx")):
+                    description = f"JavaScript/TypeScript module in {dirname or 'root'}"
+                elif path_lower.endswith((".json", ".yaml", ".yml")):
+                    description = f"Configuration file in {dirname or 'root'}"
+                else:
+                    description = f"Source file in {dirname or 'root'}"
+            except Exception as e:
+                logger.warning(f"Error generating description for {path}: {e}")
+                description = "Source file"
         
         scored_files.append({
-            "path": file_info["path"],
+            "path": path,
             "score": score,
             "description": description
         })
     
+    # Handle edge case where all files score 0
+    if scored_files and all(f["score"] == 0 for f in scored_files):
+        logger.info("All files scored 0, using alphabetical order")
+    
     # Sort by score and take top 10
-    scored_files.sort(key=lambda x: (-x["score"], x["path"]))
+    try:
+        scored_files.sort(key=lambda x: (-x["score"], x["path"]))
+    except Exception as e:
+        logger.warning(f"Error sorting files: {e}")
+        # Fallback to simple sort
+        scored_files.sort(key=lambda x: x.get("path", ""))
+    
     key_files = [
         {"path": f["path"], "description": f["description"]}
         for f in scored_files[:10]
@@ -183,12 +327,31 @@ def analyze_folder_structure(files: List[Dict[str, Any]]) -> str:
     Returns:
         Markdown string explaining folder structure
     """
-    # Extract unique directories
+    # Validate input
+    if not files or not isinstance(files, list) or len(files) == 0:
+        return "### Folder Structure\n\nNo files available for analysis.\n\n"
+    
+    # Extract unique directories with validation
     directories = set()
     for file_info in files:
-        path_parts = file_info["path"].split("/")
-        for i in range(len(path_parts) - 1):
-            directories.add("/".join(path_parts[:i+1]))
+        if not file_info or not isinstance(file_info, dict):
+            continue
+        
+        raw_path = file_info.get("path")
+        if not raw_path:
+            continue
+        
+        path = normalize_path(raw_path)
+        
+        # Handle both forward and backward slashes
+        path_parts = path.split("/")
+        
+        # Avoid circular references and excessive depth
+        max_depth = 10
+        for i in range(min(len(path_parts) - 1, max_depth)):
+            dir_path = "/".join(path_parts[:i+1])
+            if dir_path:  # Skip empty strings
+                directories.add(dir_path)
     
     # Categorize directories
     structure_explanation = []
@@ -220,10 +383,14 @@ def analyze_folder_structure(files: List[Dict[str, Any]]) -> str:
     explained_dirs = []
     for directory in sorted(directories):
         dir_lower = directory.lower()
-        for pattern, explanation in dir_patterns.items():
-            if re.match(pattern, dir_lower):
-                explained_dirs.append(f"- **`{directory}/`**: {explanation}")
-                break
+        try:
+            for pattern, explanation in dir_patterns.items():
+                if re.match(pattern, dir_lower):
+                    explained_dirs.append(f"- **`{directory}/`**: {explanation}")
+                    break
+        except re.error as e:
+            logger.warning(f"Regex error for directory {directory}: {e}")
+            continue
     
     if explained_dirs:
         structure_explanation.append("### Key Directories\n\n")
@@ -245,11 +412,32 @@ def generate_feature_guide(files: List[Dict[str, Any]]) -> str:
     Returns:
         Markdown string with feature addition guide
     """
-    # Detect project type
-    has_python = any(f["path"].endswith(".py") for f in files)
-    has_js = any(f["path"].endswith((".js", ".ts", ".jsx", ".tsx")) for f in files)
-    has_tests = any("test" in f["path"].lower() for f in files)
-    has_api = any(f["path"].startswith(("api/", "backend/", "src/api/")) for f in files)
+    # Validate input
+    if not files or not isinstance(files, list) or len(files) == 0:
+        return "### How to Add a New Feature\n\nNo files available for analysis.\n\n"
+    
+    # Detect project type with safe checks
+    has_python = False
+    has_js = False
+    has_tests = False
+    has_api = False
+    
+    for f in files:
+        if not f or not isinstance(f, dict):
+            continue
+        path = normalize_path(f.get("path", ""))
+        if not path:
+            continue
+        
+        path_lower = path.lower()
+        if path_lower.endswith(".py"):
+            has_python = True
+        if path_lower.endswith((".js", ".ts", ".jsx", ".tsx")):
+            has_js = True
+        if "test" in path_lower:
+            has_tests = True
+        if path.startswith(("api/", "backend/", "src/api/")):
+            has_api = True
     
     guide = ["### How to Add a New Feature\n\n"]
     
@@ -353,50 +541,95 @@ def generate_onboarding_doc(repo_data: List[Dict[str, Any]]) -> str:
         
     Returns:
         Markdown string containing onboarding documentation
+        
+    Raises:
+        ValueError: If repo_data is invalid or empty
     """
+    # Validate input
+    if not repo_data or not isinstance(repo_data, list):
+        raise ValueError("Invalid repository data: must be a non-empty list")
+    
+    if len(repo_data) == 0:
+        raise ValueError("Repository data is empty")
+    
     logger.info(f"Generating onboarding document for {len(repo_data)} files")
     
     doc_parts = []
     
-    # Header
-    doc_parts.append("# Repository Onboarding Guide\n\n")
-    doc_parts.append("*Auto-generated documentation to help you get started with this repository*\n\n")
-    doc_parts.append("---\n\n")
-    
-    # 1. Project Overview
-    doc_parts.append("## 📋 Project Overview\n\n")
-    doc_parts.append(extract_project_overview(repo_data))
-    doc_parts.append("\n---\n\n")
-    
-    # 2. Key Files
-    doc_parts.append("## 🔑 Top 10 Key Files\n\n")
-    key_files = identify_key_files(repo_data)
-    for i, file_info in enumerate(key_files, 1):
-        doc_parts.append(f"{i}. **`{file_info['path']}`** - {file_info['description']}\n")
-    doc_parts.append("\n---\n\n")
-    
-    # 3. Folder Structure
-    doc_parts.append("## 📁 Folder Structure\n\n")
-    doc_parts.append(analyze_folder_structure(repo_data))
-    doc_parts.append("\n---\n\n")
-    
-    # 4. Feature Addition Guide
-    doc_parts.append("## 🚀 Adding New Features\n\n")
-    doc_parts.append(generate_feature_guide(repo_data))
-    doc_parts.append("\n---\n\n")
-    
-    # Footer
-    doc_parts.append("## 💡 Next Steps\n\n")
-    doc_parts.append("1. Read through the key files to understand the codebase\n")
-    doc_parts.append("2. Set up your development environment\n")
-    doc_parts.append("3. Review existing features and code patterns\n")
-    doc_parts.append("4. Start with small changes to familiarize yourself\n")
-    doc_parts.append("5. Reach out to the team for guidance\n\n")
-    doc_parts.append("*Happy coding! 🎉*\n")
-    
-    result = "".join(doc_parts)
-    logger.info("Onboarding document generated successfully")
-    
-    return result
+    try:
+        # Header
+        doc_parts.append("# Repository Onboarding Guide\n\n")
+        doc_parts.append("*Auto-generated documentation to help you get started with this repository*\n\n")
+        doc_parts.append("---\n\n")
+        
+        # 1. Project Overview
+        doc_parts.append("## 📋 Project Overview\n\n")
+        try:
+            overview = extract_project_overview(repo_data)
+            doc_parts.append(overview)
+        except Exception as e:
+            logger.error(f"Error extracting project overview: {e}")
+            doc_parts.append("Unable to extract project overview.\n")
+        doc_parts.append("\n---\n\n")
+        
+        # 2. Key Files
+        doc_parts.append("## 🔑 Top 10 Key Files\n\n")
+        try:
+            key_files = identify_key_files(repo_data)
+            if key_files:
+                for i, file_info in enumerate(key_files, 1):
+                    path = file_info.get('path', 'Unknown')
+                    desc = file_info.get('description', 'No description')
+                    doc_parts.append(f"{i}. **`{path}`** - {desc}\n")
+            else:
+                doc_parts.append("No key files identified.\n")
+        except Exception as e:
+            logger.error(f"Error identifying key files: {e}")
+            doc_parts.append("Unable to identify key files.\n")
+        doc_parts.append("\n---\n\n")
+        
+        # 3. Folder Structure
+        doc_parts.append("## 📁 Folder Structure\n\n")
+        try:
+            structure = analyze_folder_structure(repo_data)
+            doc_parts.append(structure)
+        except Exception as e:
+            logger.error(f"Error analyzing folder structure: {e}")
+            doc_parts.append("Unable to analyze folder structure.\n")
+        doc_parts.append("\n---\n\n")
+        
+        # 4. Feature Addition Guide
+        doc_parts.append("## 🚀 Adding New Features\n\n")
+        try:
+            guide = generate_feature_guide(repo_data)
+            doc_parts.append(guide)
+        except Exception as e:
+            logger.error(f"Error generating feature guide: {e}")
+            doc_parts.append("Unable to generate feature guide.\n")
+        doc_parts.append("\n---\n\n")
+        
+        # Footer
+        doc_parts.append("## 💡 Next Steps\n\n")
+        doc_parts.append("1. Read through the key files to understand the codebase\n")
+        doc_parts.append("2. Set up your development environment\n")
+        doc_parts.append("3. Review existing features and code patterns\n")
+        doc_parts.append("4. Start with small changes to familiarize yourself\n")
+        doc_parts.append("5. Reach out to the team for guidance\n\n")
+        doc_parts.append("*Happy coding! 🎉*\n")
+        
+        # Use efficient string building
+        result = "".join(doc_parts)
+        
+        # Validate result is not empty
+        if not result or not result.strip():
+            raise ValueError("Generated documentation is empty")
+        
+        logger.info("Onboarding document generated successfully")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error generating onboarding document: {e}")
+        raise
 
 # Made with Bob
