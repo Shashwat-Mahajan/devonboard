@@ -8,6 +8,7 @@ from typing import Dict, Any
 import logging
 
 from github_client import fetch_repo_contents
+from doc_generator import generate_onboarding_doc
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -44,10 +45,8 @@ class AnalyzeRequest(BaseModel):
 
 class AnalyzeResponse(BaseModel):
     """Response model for repository analysis."""
-    status: str
-    repository: str
-    files_count: int
-    files: list[Dict[str, Any]]
+    onboarding_doc: str
+    file_count: int
 
 
 @app.get("/")
@@ -94,11 +93,13 @@ async def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
         
         logger.info(f"Successfully fetched {len(files)} files")
         
+        # Generate onboarding documentation
+        onboarding_doc = generate_onboarding_doc(files)
+        logger.info("Generated onboarding documentation")
+        
         return AnalyzeResponse(
-            status="success",
-            repository=request.github_url,
-            files_count=len(files),
-            files=files
+            onboarding_doc=onboarding_doc,
+            file_count=len(files)
         )
         
     except ValueError as e:
