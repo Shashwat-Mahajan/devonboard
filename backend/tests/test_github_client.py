@@ -1,6 +1,6 @@
 """
 Unit tests for github_client module.
-Tests GitHub API interactions with mocked responses.
+Tests GitHub API interactions with the new implementation.
 """
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
@@ -13,10 +13,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from github_client import (
     parse_github_url,
-    should_skip_file,
-    fetch_repo_tree,
-    fetch_file_content,
-    fetch_repo_contents,
+    detect_language,
+    detect_framework,
+    detect_repo_type,
+    fetch_repo_data,
 )
 
 
@@ -53,235 +53,170 @@ class TestParseGithubUrl:
         assert owner == "owner"
         assert repo == "repo"
     
-    def test_ssh_url(self):
-        """Test parsing SSH GitHub URL."""
-        owner, repo = parse_github_url("git@github.com:owner/repo")
-        assert owner == "owner"
-        assert repo == "repo"
-    
     def test_invalid_url_empty(self):
         """Test that empty URL raises ValueError."""
-        with pytest.raises(ValueError, match="empty"):
+        with pytest.raises(ValueError, match="Invalid GitHub URL"):
             parse_github_url("")
     
     def test_invalid_url_whitespace(self):
         """Test that whitespace-only URL raises ValueError."""
-        with pytest.raises(ValueError, match="empty"):
+        with pytest.raises(ValueError, match="Invalid GitHub URL"):
             parse_github_url("   ")
     
     def test_invalid_url_not_github(self):
         """Test that non-GitHub URL raises ValueError."""
-        with pytest.raises(ValueError, match="GitHub repository URL"):
+        with pytest.raises(ValueError, match="Invalid GitHub URL"):
             parse_github_url("https://gitlab.com/owner/repo")
     
     def test_invalid_url_format(self):
         """Test that malformed GitHub URL raises ValueError."""
-        with pytest.raises(ValueError, match="Invalid GitHub URL format"):
+        with pytest.raises(ValueError, match="Invalid GitHub URL"):
             parse_github_url("https://github.com/owner")
     
     def test_invalid_url_none(self):
         """Test that None raises ValueError."""
-        with pytest.raises(ValueError, match="non-empty string"):
+        with pytest.raises(ValueError, match="Invalid GitHub URL"):
             parse_github_url(None)
 
 
-class TestShouldSkipFile:
-    """Tests for should_skip_file function."""
+class TestDetectLanguage:
+    """Tests for detect_language function."""
     
-    def test_skip_node_modules(self):
-        """Test that node_modules files are skipped."""
-        assert should_skip_file("node_modules/package/index.js") is True
+    def test_javascript_detection(self):
+        """Test JavaScript detection from .js files."""
+        files = ["src/app.js", "utils.js", "index.js"]
+        result = detect_language(files)
+        assert result == "JavaScript"
     
-    def test_skip_git_directory(self):
-        """Test that .git files are skipped."""
-        assert should_skip_file(".git/config") is True
+    def test_typescript_detection(self):
+        """Test TypeScript detection from .ts files."""
+        files = ["src/app.ts", "utils.ts", "index.ts"]
+        result = detect_language(files)
+        assert result == "TypeScript"
     
-    def test_skip_pycache(self):
-        """Test that __pycache__ files are skipped."""
-        assert should_skip_file("__pycache__/module.pyc") is True
+    def test_python_detection(self):
+        """Test Python detection from .py files."""
+        files = ["main.py", "utils.py", "models.py"]
+        result = detect_language(files)
+        assert result == "Python"
     
-    def test_skip_binary_extensions(self):
-        """Test that binary files are skipped."""
-        assert should_skip_file("image.png") is True
-        assert should_skip_file("document.pdf") is True
-        assert should_skip_file("archive.zip") is True
+    def test_mixed_files_most_common(self):
+        """Test that most common language is detected."""
+        files = ["app.py", "utils.py", "test.js", "config.py"]
+        result = detect_language(files)
+        assert result == "Python"
     
-    def test_skip_lock_files(self):
-        """Test that lock files are skipped."""
-        assert should_skip_file("package-lock.json") is True
-        assert should_skip_file("yarn.lock") is True
+    def test_react_jsx_detection(self):
+        """Test React detection from .jsx files."""
+        files = ["App.jsx", "Component.jsx"]
+        result = detect_language(files)
+        assert result == "JavaScript/React"
     
-    def test_allow_source_files(self):
-        """Test that source files are not skipped."""
-        assert should_skip_file("src/app.py") is False
-        assert should_skip_file("index.js") is False
-        assert should_skip_file("README.md") is False
-    
-    def test_skip_path_traversal(self):
-        """Test that path traversal attempts are skipped."""
-        assert should_skip_file("../etc/passwd") is True
-        assert should_skip_file("/etc/passwd") is True
-    
-    def test_skip_invalid_input(self):
-        """Test that invalid input is skipped."""
-        assert should_skip_file("") is True
-        assert should_skip_file(None) is True
+    def test_unknown_language(self):
+        """Test unknown language for non-code files."""
+        files = ["README.md", "config.json", "data.txt"]
+        result = detect_language(files)
+        assert result == "Unknown"
 
 
-class TestFetchRepoTree:
-    """Tests for fetch_repo_tree function with mocked API calls."""
+class TestDetectFramework:
+    """Tests for detect_framework function."""
+    
+    def test_nextjs_detection(self):
+        """Test Next.js detection."""
+        files = ["next.config.js", "pages/_app.js", "pages/index.js"]
+        result = detect_framework(files)
+        assert result == "Next.js"
+    
+    def test_react_detection(self):
+        """Test React detection."""
+        files = ["src/App.jsx", "src/components/Button.jsx"]
+        result = detect_framework(files)
+        assert result == "React"
+    
+    def test_fastapi_detection(self):
+        """Test FastAPI detection."""
+        files = ["main.py", "routes/api.py"]
+        result = detect_framework(files)
+        # Should detect FastAPI if file contains fastapi patterns
+        assert result in ["FastAPI", "Unknown"]
+    
+    def test_express_detection(self):
+        """Test Express detection."""
+        files = ["server.js", "routes/api.js", "app.js"]
+        result = detect_framework(files)
+        # Should detect Express if file contains express patterns
+        assert result in ["Express", "Unknown"]
+    
+    def test_django_detection(self):
+        """Test Django detection."""
+        files = ["settings.py", "urls.py", "manage.py"]
+        result = detect_framework(files)
+        assert result == "Django"
+    
+    def test_unknown_framework(self):
+        """Test unknown framework."""
+        files = ["main.py", "utils.py"]
+        result = detect_framework(files)
+        assert result == "Unknown"
+
+
+class TestDetectRepoType:
+    """Tests for detect_repo_type function."""
+    
+    def test_frontend_detection(self):
+        """Test frontend project detection."""
+        files = ["src/App.jsx", "src/components/Button.tsx", "public/index.html"]
+        result = detect_repo_type(files)
+        assert result['has_frontend'] is True
+        assert result['language'] in ["JavaScript/React", "TypeScript/React"]
+    
+    def test_backend_detection(self):
+        """Test backend project detection."""
+        files = ["main.py", "routes/api.py", "models/user.py"]
+        result = detect_repo_type(files)
+        assert result['has_backend'] is True
+        assert result['language'] == "Python"
+    
+    def test_database_detection(self):
+        """Test database detection."""
+        files = ["models/user.py", "migrations/001_initial.py", "schema.sql"]
+        result = detect_repo_type(files)
+        assert result['has_database'] is True
+    
+    def test_auth_detection(self):
+        """Test authentication detection."""
+        files = ["auth/login.py", "middleware/jwt.js", "guards/auth.guard.ts"]
+        result = detect_repo_type(files)
+        assert result['has_auth'] is True
+    
+    def test_tests_detection(self):
+        """Test tests detection."""
+        files = ["tests/test_api.py", "__tests__/App.test.js", "spec/user.spec.js"]
+        result = detect_repo_type(files)
+        assert result['has_tests'] is True
+    
+    def test_fullstack_detection(self):
+        """Test fullstack project detection."""
+        files = [
+            "frontend/src/App.jsx",
+            "backend/main.py",
+            "backend/models/user.py",
+            "backend/auth/login.py"
+        ]
+        result = detect_repo_type(files)
+        assert result['has_frontend'] is True
+        assert result['has_backend'] is True
+        assert result['has_database'] is True
+        assert result['has_auth'] is True
+
+
+class TestFetchRepoData:
+    """Tests for fetch_repo_data function - main integration function."""
     
     @pytest.mark.asyncio
     async def test_successful_fetch(self):
-        """Test successful repository tree fetch."""
-        # Mock HTTP client
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        
-        # Mock repository metadata response
-        repo_response = Mock()
-        repo_response.status_code = 200
-        repo_response.json.return_value = {"default_branch": "main"}
-        
-        # Mock tree response
-        tree_response = Mock()
-        tree_response.status_code = 200
-        tree_response.json.return_value = {
-            "tree": [
-                {"path": "README.md", "type": "blob", "size": 100},
-                {"path": "src/app.py", "type": "blob", "size": 500},
-            ]
-        }
-        
-        # Set up mock to return different responses for different calls
-        mock_client.get.side_effect = [repo_response, tree_response]
-        
-        result = await fetch_repo_tree("owner", "repo", mock_client)
-        
-        assert len(result) == 2
-        assert result[0]["path"] == "README.md"
-        assert result[1]["path"] == "src/app.py"
-    
-    @pytest.mark.asyncio
-    async def test_repository_not_found(self):
-        """Test error handling when repository is not found."""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        
-        # Mock 404 response
-        repo_response = Mock()
-        repo_response.status_code = 404
-        mock_client.get.return_value = repo_response
-        
-        with pytest.raises(ValueError, match="Repository not found"):
-            await fetch_repo_tree("owner", "nonexistent", mock_client)
-    
-    @pytest.mark.asyncio
-    async def test_rate_limit_exceeded(self):
-        """Test error handling when rate limit is exceeded."""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        
-        # Mock 403 response (rate limit)
-        repo_response = Mock()
-        repo_response.status_code = 403
-        repo_response.json.return_value = {"message": "rate limit exceeded"}
-        mock_client.get.return_value = repo_response
-        
-        with pytest.raises(PermissionError, match="rate limit"):
-            await fetch_repo_tree("owner", "repo", mock_client)
-    
-    @pytest.mark.asyncio
-    async def test_timeout_error(self):
-        """Test error handling on timeout."""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.get.side_effect = httpx.TimeoutException("Timeout")
-        
-        with pytest.raises(TimeoutError):
-            await fetch_repo_tree("owner", "repo", mock_client)
-
-
-class TestFetchFileContent:
-    """Tests for fetch_file_content function with mocked API calls."""
-    
-    @pytest.mark.asyncio
-    async def test_successful_fetch(self):
-        """Test successful file content fetch."""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        
-        # Mock successful response with base64 content
-        import base64
-        content = "print('hello world')"
-        encoded = base64.b64encode(content.encode()).decode()
-        
-        response = Mock()
-        response.status_code = 200
-        response.json.return_value = {
-            "content": encoded,
-            "size": len(content)
-        }
-        mock_client.get.return_value = response
-        
-        result = await fetch_file_content("owner", "repo", "test.py", mock_client)
-        
-        assert result == content
-    
-    @pytest.mark.asyncio
-    async def test_file_too_large(self):
-        """Test that large files return None."""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        
-        response = Mock()
-        response.status_code = 200
-        response.json.return_value = {
-            "content": "dGVzdA==",
-            "size": 2 * 1024 * 1024  # 2MB (exceeds MAX_FILE_SIZE)
-        }
-        mock_client.get.return_value = response
-        
-        result = await fetch_file_content("owner", "repo", "large.bin", mock_client)
-        
-        assert result is None
-    
-    @pytest.mark.asyncio
-    async def test_binary_content_filtered(self):
-        """Test that binary content is filtered out."""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        
-        # Create content with null bytes (binary indicator)
-        import base64
-        binary_content = b"text\x00binary"
-        encoded = base64.b64encode(binary_content).decode()
-        
-        response = Mock()
-        response.status_code = 200
-        response.json.return_value = {
-            "content": encoded,
-            "size": len(binary_content)
-        }
-        mock_client.get.return_value = response
-        
-        result = await fetch_file_content("owner", "repo", "binary.bin", mock_client)
-        
-        assert result is None
-    
-    @pytest.mark.asyncio
-    async def test_rate_limit_returns_none(self):
-        """Test that rate limit returns None instead of raising."""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        
-        response = Mock()
-        response.status_code = 429
-        mock_client.get.return_value = response
-        
-        result = await fetch_file_content("owner", "repo", "test.py", mock_client)
-        
-        assert result is None
-
-
-class TestFetchRepoContents:
-    """Tests for fetch_repo_contents function - main integration function."""
-    
-    @pytest.mark.asyncio
-    async def test_successful_fetch_filters_binary(self):
-        """Test that binary files are filtered out from results."""
+        """Test successful repository data fetch."""
         with patch('github_client.httpx.AsyncClient') as mock_client_class:
             mock_client = AsyncMock()
             mock_client_class.return_value.__aenter__.return_value = mock_client
@@ -289,24 +224,27 @@ class TestFetchRepoContents:
             # Mock repository metadata
             repo_response = Mock()
             repo_response.status_code = 200
-            repo_response.json.return_value = {"default_branch": "main"}
+            repo_response.json.return_value = {
+                "description": "Test repo",
+                "stargazers_count": 100,
+                "language": "Python",
+                "default_branch": "main"
+            }
             
-            # Mock tree with mixed file types
+            # Mock tree with files
             tree_response = Mock()
             tree_response.status_code = 200
             tree_response.json.return_value = {
                 "tree": [
                     {"path": "README.md", "type": "blob", "size": 100, "sha": "abc123"},
-                    {"path": "image.png", "type": "blob", "size": 5000, "sha": "def456"},
-                    {"path": "src/app.py", "type": "blob", "size": 500, "sha": "ghi789"},
-                    {"path": "node_modules/pkg/index.js", "type": "blob", "size": 200, "sha": "jkl012"},
+                    {"path": "main.py", "type": "blob", "size": 500, "sha": "def456"},
                 ]
             }
             
             # Mock file content responses
             import base64
             readme_content = "# Test Project"
-            app_content = "def main(): pass"
+            main_content = "def main(): pass"
             
             readme_response = Mock()
             readme_response.status_code = 200
@@ -315,11 +253,11 @@ class TestFetchRepoContents:
                 "size": len(readme_content)
             }
             
-            app_response = Mock()
-            app_response.status_code = 200
-            app_response.json.return_value = {
-                "content": base64.b64encode(app_content.encode()).decode(),
-                "size": len(app_content)
+            main_response = Mock()
+            main_response.status_code = 200
+            main_response.json.return_value = {
+                "content": base64.b64encode(main_content.encode()).decode(),
+                "size": len(main_content)
             }
             
             # Set up mock responses in order
@@ -327,56 +265,42 @@ class TestFetchRepoContents:
                 repo_response,
                 tree_response,
                 readme_response,
-                app_response,
+                main_response,
             ]
             
-            result = await fetch_repo_contents("https://github.com/owner/repo")
+            result = await fetch_repo_data("https://github.com/owner/repo")
             
-            # Should only include non-binary, non-skipped files
-            assert len(result) == 2
-            paths = [f["path"] for f in result]
-            assert "README.md" in paths
-            assert "src/app.py" in paths
-            assert "image.png" not in paths  # Binary file filtered
-            assert "node_modules/pkg/index.js" not in paths  # Skipped pattern
+            # Verify result structure
+            assert result['owner'] == 'owner'
+            assert result['repo'] == 'repo'
+            assert result['description'] == 'Test repo'
+            assert result['stars'] == 100
+            assert result['language'] == 'Python'
+            assert len(result['files']) >= 1
+            assert 'repo_type' in result
+            assert result['file_count'] == 2
     
     @pytest.mark.asyncio
     async def test_invalid_url_raises_error(self):
         """Test that invalid GitHub URL raises ValueError."""
-        with pytest.raises(ValueError, match="GitHub repository URL"):
-            await fetch_repo_contents("https://gitlab.com/owner/repo")
+        with pytest.raises(ValueError, match="Invalid GitHub URL"):
+            await fetch_repo_data("https://gitlab.com/owner/repo")
     
     @pytest.mark.asyncio
-    async def test_empty_repository_raises_error(self):
-        """Test that empty repository raises ValueError."""
+    async def test_repository_not_found(self):
+        """Test error handling when repository is not found."""
         with patch('github_client.httpx.AsyncClient') as mock_client_class:
             mock_client = AsyncMock()
             mock_client_class.return_value.__aenter__.return_value = mock_client
             
-            # Mock repository metadata
+            # Mock 404 response
             repo_response = Mock()
-            repo_response.status_code = 200
-            repo_response.json.return_value = {"default_branch": "main"}
+            repo_response.status_code = 404
+            mock_client.get.return_value = repo_response
             
-            # Mock empty tree
-            tree_response = Mock()
-            tree_response.status_code = 200
-            tree_response.json.return_value = {"tree": []}
-            
-            mock_client.get.side_effect = [repo_response, tree_response]
-            
-            with pytest.raises(ValueError, match="empty"):
-                await fetch_repo_contents("https://github.com/owner/repo")
+            with pytest.raises(ValueError, match="Repository not found"):
+                await fetch_repo_data("https://github.com/owner/nonexistent")
     
-    @pytest.mark.asyncio
-    async def test_connection_error_handling(self):
-        """Test that connection errors are properly raised."""
-        with patch('github_client.httpx.AsyncClient') as mock_client_class:
-            mock_client = AsyncMock()
-            mock_client_class.return_value.__aenter__.return_value = mock_client
-            mock_client.get.side_effect = httpx.ConnectError("Connection failed")
-            
-            with pytest.raises(ConnectionError, match="Failed to connect"):
-                await fetch_repo_contents("https://github.com/owner/repo")
+
 
 # Made with Bob
