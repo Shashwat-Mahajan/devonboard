@@ -1,62 +1,43 @@
 """
 GitHub API client for fetching repository contents.
+Complete rewrite with repo type detection and smart file selection.
 """
 import os
 import re
 import base64
-from typing import List, Dict, Any, Optional
+import asyncio
+from typing import Dict, Any, Optional, List
 import httpx
+from pathlib import Path
 from dotenv import load_dotenv
 import logging
-import asyncio
 
-# Load environment variables from .env file (for GITHUB_TOKEN)
-load_dotenv()
+# Load environment variables from .env file in the same directory
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
-# Initialize logger for tracking GitHub API interactions
+# Initialize logger
 logger = logging.getLogger(__name__)
 
 # GitHub API configuration
-GITHUB_API_BASE = "https://api.github.com"  # Base URL for GitHub REST API
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Optional token for higher rate limits
+GITHUB_API_BASE = "https://api.github.com"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-# File patterns to skip (common directories and files that shouldn't be analyzed)
-SKIP_PATTERNS = [
-    r"node_modules/",  # Node.js dependencies
-    r"\.git/",  # Git metadata
-    r"__pycache__/",  # Python bytecode cache
-    r"\.pyc$",  # Python compiled files
-    r"dist/",  # Distribution/build output
-    r"build/",  # Build artifacts
-    r"\.env$",  # Environment variables (sensitive)
-    r"package-lock\.json$",  # Node.js lock file (too large)
-    r"yarn\.lock$",  # Yarn lock file (too large)
-]
+# Request timeout in seconds
+REQUEST_TIMEOUT = 30.0
 
-# Binary file extensions to skip (cannot be analyzed as text)
-BINARY_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg",  # Images
-    ".pdf", ".zip", ".tar", ".gz", ".exe", ".dll",  # Archives and executables
-    ".so", ".dylib", ".bin", ".dat", ".db", ".sqlite",  # Binary data
-    ".woff", ".woff2", ".ttf", ".eot", ".otf"  # Fonts
-}
-
-# Maximum file size (1MB) - larger files are skipped to prevent memory issues
-MAX_FILE_SIZE = 1024 * 1024
-
-# Maximum number of files to fetch (prevent memory exhaustion on large repos)
-MAX_FILES = 100
-
-# Request timeout in seconds (prevent hanging on slow connections)
-REQUEST_TIMEOUT = 60.0
-
-# Maximum retries for transient errors (network issues, temporary API failures)
-MAX_RETRIES = 3
+# Module-level cache for repository data
+_repo_cache: Dict[str, Dict[str, Any]] = {}
 
 
 def parse_github_url(url: str) -> tuple[str, str]:
     """
     Parse GitHub URL to extract owner and repository name.
+    
+    Supports formats:
+    - https://github.com/owner/repo
+    - https://github.com/owner/repo.git
+    - https://github.com/owner/repo/tree/main
+    - github.com/owner/repo
     
     Args:
         url: GitHub repository URL
@@ -67,489 +48,435 @@ def parse_github_url(url: str) -> tuple[str, str]:
     Raises:
         ValueError: If URL format is invalid
     """
-    # Validate input is a non-empty string
     if not url or not isinstance(url, str):
-        raise ValueError("URL must be a non-empty string")
+        raise ValueError("Invalid GitHub URL format. Use https://github.com/owner/repo")
     
-    # Strip whitespace from both ends
     url = url.strip()
     
-    # Check for empty string after stripping
     if not url:
-        raise ValueError("URL cannot be empty or whitespace")
+        raise ValueError("Invalid GitHub URL format. Use https://github.com/owner/repo")
     
-    # Check if it's a GitHub URL (basic validation)
-    if "github.com" not in url.lower():
-        raise ValueError("URL must be a GitHub repository URL")
-    
-    # Remove trailing slashes and .git extension for normalization
+    # Remove trailing slashes
     url = url.rstrip("/")
+    
+    # Remove .git extension if present
     if url.endswith(".git"):
         url = url[:-4]
     
-    # Match GitHub URL patterns (support various formats)
-    # Pattern 1: HTTPS URLs (with or without www)
-    # Pattern 2: SSH URLs (git@github.com:owner/repo)
-    patterns = [
-        r"(?:https?://)?(?:www\.)?github\.com/([^/\s]+)/([^/\s]+)",
-        r"git@github\.com:([^/\s]+)/([^/\s]+)",
-    ]
+    # Remove tree/branch paths (e.g., /tree/main)
+    url = re.sub(r'/tree/[^/]+.*$', '', url)
     
-    # Try each pattern to extract owner and repo
-    for pattern in patterns:
-        try:
-            match = re.search(pattern, url, re.IGNORECASE)
-            if match:
-                owner = match.group(1).strip()
-                repo = match.group(2).strip()
-                
-                # Validate owner and repo names are not empty
-                if not owner or not repo:
-                    continue
-                
-                # Check for invalid characters (only allow word chars, hyphens, dots)
-                if not re.match(r'^[\w\-\.]+$', owner) or not re.match(r'^[\w\-\.]+$', repo):
-                    raise ValueError(f"Invalid characters in owner or repository name")
-                
-                return owner, repo
-        except re.error as e:
-            logger.warning(f"Regex error parsing URL: {e}")
-            continue
+    # Pattern to match GitHub URLs
+    pattern = r'(?:https?://)?(?:www\.)?github\.com/([^/\s]+)/([^/\s]+)'
     
-    # No pattern matched
-    raise ValueError(f"Invalid GitHub URL format: {url}")
+    match = re.search(pattern, url, re.IGNORECASE)
+    
+    if not match:
+        raise ValueError("Invalid GitHub URL format. Use https://github.com/owner/repo")
+    
+    owner = match.group(1).strip()
+    repo = match.group(2).strip()
+    
+    if not owner or not repo:
+        raise ValueError("Invalid GitHub URL format. Use https://github.com/owner/repo")
+    
+    return owner, repo
 
 
-def should_skip_file(path: str) -> bool:
-    """
-    Check if a file should be skipped based on patterns.
+def detect_language(file_paths: List[str]) -> str:
+    """Detect primary programming language from file extensions."""
+    extensions = {}
+    for p in file_paths:
+        ext = p.rsplit('.', 1)[-1].lower() if '.' in p else ''
+        if ext in ['js', 'ts', 'jsx', 'tsx', 'py', 'java',
+                   'go', 'rs', 'rb', 'php', 'cs', 'cpp', 'c']:
+            extensions[ext] = extensions.get(ext, 0) + 1
     
-    Args:
-        path: File path to check
-        
-    Returns:
-        True if file should be skipped, False otherwise
-    """
-    # Validate path is a non-empty string
-    if not path or not isinstance(path, str):
-        return True
+    if not extensions:
+        return 'Unknown'
     
-    # Normalize path separators to forward slashes
-    path = path.replace("\\", "/")
-    
-    # Check for symlinks or circular references (basic security check)
-    # Paths with ".." could traverse outside repository
-    if ".." in path or path.startswith("/"):
-        logger.warning(f"Suspicious path detected: {path}")
-        return True
-    
-    # Check skip patterns with error handling
-    try:
-        for pattern in SKIP_PATTERNS:
-            # If path matches any skip pattern, skip it
-            if re.search(pattern, path):
-                return True
-    except re.error as e:
-        logger.warning(f"Regex error checking path {path}: {e}")
-        return True  # Skip on error to be safe
-    
-    # Check binary extensions (files we can't analyze as text)
-    try:
-        _, ext = os.path.splitext(path)
-        if ext.lower() in BINARY_EXTENSIONS:
-            return True
-    except Exception as e:
-        logger.warning(f"Error checking file extension for {path}: {e}")
-        return True  # Skip on error to be safe
-    
-    return False
-
-
-async def fetch_repo_tree(
-    owner: str,
-    repo: str,
-    client: httpx.AsyncClient
-) -> List[Dict[str, Any]]:
-    """
-    Fetch repository tree from GitHub API with retry logic.
-    
-    Args:
-        owner: Repository owner
-        repo: Repository name
-        client: HTTP client
-        
-    Returns:
-        List of file objects from GitHub tree API
-        
-    Raises:
-        ValueError: If repository not found
-        PermissionError: If access denied or rate limited
-        TimeoutError: If request times out
-        ConnectionError: If network error occurs
-    """
-    # Set up headers for GitHub API request
-    headers = {
-        "Accept": "application/vnd.github.v3+json",  # Request GitHub API v3 format
+    primary = max(extensions, key=extensions.get)
+    mapping = {
+        'js': 'JavaScript', 'ts': 'TypeScript',
+        'jsx': 'JavaScript/React', 'tsx': 'TypeScript/React',
+        'py': 'Python', 'java': 'Java', 'go': 'Go',
+        'rs': 'Rust', 'rb': 'Ruby', 'php': 'PHP',
+        'cs': 'C#', 'cpp': 'C++', 'c': 'C'
     }
-    # Add authentication token if available (increases rate limits)
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"token {GITHUB_TOKEN}"
-    
-    # Retry logic for transient errors (network issues, temporary API failures)
-    for attempt in range(MAX_RETRIES):
-        try:
-            # Step 1: Get repository metadata to find default branch
-            repo_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
-            
-            try:
-                response = await client.get(repo_url, headers=headers, timeout=REQUEST_TIMEOUT)
-            except httpx.TimeoutException:
-                # Retry with exponential backoff on timeout
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
-                    continue
-                raise TimeoutError(f"Request timed out after {REQUEST_TIMEOUT} seconds")
-            except httpx.ConnectError as e:
-                # Retry on connection errors
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                raise ConnectionError(f"Failed to connect to GitHub API: {str(e)}")
-            
-            # Handle specific HTTP status codes
-            if response.status_code == 404:
-                # Repository doesn't exist or is private
-                raise ValueError(f"Repository not found: {owner}/{repo}")
-            elif response.status_code == 403:
-                # Rate limit or access denied
-                error_msg = "GitHub API rate limit exceeded or access denied"
-                try:
-                    error_data = response.json()
-                    if "rate limit" in str(error_data).lower():
-                        error_msg = "GitHub API rate limit exceeded. Please provide a GitHub token or try again later."
-                except:
-                    pass
-                raise PermissionError(error_msg)
-            elif response.status_code == 429:
-                # Too many requests
-                raise PermissionError("GitHub API rate limit exceeded. Please try again later.")
-            
-            # Raise exception for other HTTP errors
-            response.raise_for_status()
-            repo_data = response.json()
-            # Extract default branch (usually "main" or "master")
-            default_branch = repo_data.get("default_branch", "main")
-            
-            # Step 2: Get repository tree (all files recursively)
-            tree_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{default_branch}?recursive=1"
-            
-            try:
-                response = await client.get(tree_url, headers=headers, timeout=REQUEST_TIMEOUT)
-            except httpx.TimeoutException:
-                # Retry with exponential backoff on timeout
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                raise TimeoutError(f"Request timed out after {REQUEST_TIMEOUT} seconds")
-            except httpx.ConnectError as e:
-                # Retry on connection errors
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                raise ConnectionError(f"Failed to connect to GitHub API: {str(e)}")
-            
-            # Handle rate limiting
-            if response.status_code == 429:
-                raise PermissionError("GitHub API rate limit exceeded. Please try again later.")
-            
-            # Raise exception for other HTTP errors
-            response.raise_for_status()
-            tree_data = response.json()
-            
-            # Return list of files from tree
-            return tree_data.get("tree", [])
-            
-        except (TimeoutError, ValueError, PermissionError, ConnectionError):
-            # Don't retry these errors (they're not transient)
-            raise
-        except Exception as e:
-            # Retry on unexpected errors
-            if attempt < MAX_RETRIES - 1:
-                logger.warning(f"Attempt {attempt + 1} failed: {str(e)}, retrying...")
-                await asyncio.sleep(2 ** attempt)
-                continue
-            raise
-    
-    # All retries exhausted
-    raise ConnectionError("Failed to fetch repository tree after multiple attempts")
+    return mapping.get(primary, primary.upper())
 
 
-async def fetch_file_content(
+def detect_framework(file_paths: List[str]) -> str:
+    """Detect framework from file paths and names."""
+    paths_str = ' '.join(file_paths).lower()
+    
+    frameworks = {
+        'Next.js': ['next.config', 'pages/_app', 'app/page'],
+        'React': ['react', '.jsx', '.tsx'],
+        'Vue': ['vue.config', '.vue'],
+        'Angular': ['angular.json', 'ng-'],
+        'Express': ['express', 'router'],
+        'FastAPI': ['fastapi', '@app.get', '@router'],
+        'Django': ['django', 'settings.py', 'urls.py'],
+        'Flask': ['flask', '@app.route'],
+        'Spring': ['spring', 'application.properties'],
+        'Rails': ['gemfile', 'routes.rb'],
+        'Laravel': ['artisan', 'composer.json']
+    }
+    
+    for fw, indicators in frameworks.items():
+        if any(ind in paths_str for ind in indicators):
+            return fw
+    
+    return 'Unknown'
+
+
+def detect_repo_type(file_paths: List[str]) -> Dict[str, Any]:
+    """
+    Detect repository type by scanning all file paths.
+    Returns dict with has_frontend, has_backend, has_database, has_auth, has_tests, language, framework.
+    """
+    paths_str = ' '.join(file_paths).lower()
+    
+    return {
+        'has_frontend': any(x in paths_str for x in [
+            'react', 'vue', 'angular', 'next', 'nuxt',
+            'jsx', 'tsx', 'html', 'css', 'component'
+        ]),
+        'has_backend': any(x in paths_str for x in [
+            'server', 'app.py', 'main.py', 'index.js',
+            'app.js', 'django', 'flask', 'fastapi',
+            'express', 'spring', 'rails', 'api', 'route'
+        ]),
+        'has_database': any(x in paths_str for x in [
+            'model', 'schema', 'migration', 'mongoose',
+            'sequelize', 'prisma', 'sqlalchemy', 'entity',
+            'database', 'db'
+        ]),
+        'has_auth': any(x in paths_str for x in [
+            'auth', 'login', 'jwt', 'passport', 'oauth',
+            'session', 'middleware', 'guard', 'token'
+        ]),
+        'has_tests': any(x in paths_str for x in [
+            'test', 'spec', '__test__', 'jest', 'pytest'
+        ]),
+        'language': detect_language(file_paths),
+        'framework': detect_framework(file_paths)
+    }
+
+
+async def _fetch_single_file(
+    client: httpx.AsyncClient,
     owner: str,
     repo: str,
     path: str,
-    client: httpx.AsyncClient
-) -> Optional[str]:
+    headers: Dict[str, str],
+    size: int = 0,
+    priority: int = 4,
+    category: str = "other"
+) -> Optional[Dict[str, Any]]:
     """
-    Fetch content of a single file from GitHub with error handling.
+    Fetch a single file's content from GitHub API with metadata.
     
-    Args:
-        owner: Repository owner
-        repo: Repository name
-        path: File path in repository
-        client: HTTP client
-        
     Returns:
-        File content as string, or None if content cannot be fetched
+        Dictionary with path, content (up to 8000 chars), size, priority, category
     """
-    # Validate path is a non-empty string
-    if not path or not isinstance(path, str):
-        logger.warning("Invalid file path")
-        return None
-    
-    # Set up headers for GitHub API request
-    headers = {
-        "Accept": "application/vnd.github.v3+json",
-    }
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"token {GITHUB_TOKEN}"
-    
-    # URL encode the path to handle special characters (spaces, etc.)
-    try:
-        from urllib.parse import quote
-        encoded_path = quote(path, safe='/')  # Keep forward slashes unencoded
-    except Exception as e:
-        logger.warning(f"Failed to encode path {path}: {e}")
-        return None
-    
-    # Build URL for file contents endpoint
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{encoded_path}"
+    content_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{path}"
     
     try:
-        # Fetch file content from GitHub
-        response = await client.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        content_response = await client.get(content_url, headers=headers)
         
-        # Handle rate limiting gracefully (don't fail entire operation)
-        if response.status_code == 429:
-            logger.warning(f"Rate limited while fetching {path}")
-            return None
-        
-        # Raise exception for other HTTP errors
-        response.raise_for_status()
-        
-        # Parse JSON response
-        data = response.json()
-        
-        # Validate response structure is a dictionary
-        if not isinstance(data, dict):
-            logger.warning(f"Unexpected response format for {path}")
-            return None
-        
-        # Check file size to prevent memory issues
-        file_size = data.get("size", 0)
-        if not isinstance(file_size, (int, float)) or file_size > MAX_FILE_SIZE:
-            logger.warning(f"File too large ({file_size} bytes), skipping: {path}")
-            return None
-        
-        # Extract base64-encoded content from response
-        content = data.get("content", "")
-        if not content:
-            return None
-        
-        try:
-            # Decode base64 content to bytes
-            decoded = base64.b64decode(content)
+        if content_response.status_code == 200:
+            content_data = content_response.json()
+            encoded_content = content_data.get("content", "")
             
-            # Try UTF-8 decoding with error handling
-            try:
-                # Attempt strict UTF-8 decoding
-                text_content = decoded.decode("utf-8")
-            except UnicodeDecodeError:
-                # Fallback: ignore invalid UTF-8 characters for binary-like files
-                text_content = decoded.decode("utf-8", errors="ignore")
-            
-            # Check for binary content (null bytes indicate binary data)
-            if '\x00' in text_content:
-                logger.warning(f"Binary content detected in {path}")
-                return None
-            
-            return text_content
-            
-        except Exception as e:
-            logger.warning(f"Failed to decode content for {path}: {str(e)}")
-            return None
-        
-    except httpx.TimeoutException:
-        # Timeout is not fatal, just skip this file
-        logger.warning(f"Timeout fetching content for {path}")
-        return None
-    except httpx.HTTPStatusError as e:
-        # HTTP errors are not fatal, just skip this file
-        logger.warning(f"HTTP error fetching {path}: {e.response.status_code}")
-        return None
+            if encoded_content:
+                try:
+                    # Decode base64 content
+                    decoded = base64.b64decode(encoded_content)
+                    text_content = decoded.decode("utf-8", errors="ignore")
+                    
+                    # Limit to 8000 chars
+                    text_content = text_content[:8000]
+                    
+                    logger.info(f"Fetched {path} (priority={priority}, category={category})")
+                    return {
+                        "path": path,
+                        "content": text_content,
+                        "size": size,
+                        "priority": priority,
+                        "category": category
+                    }
+                except Exception as e:
+                    logger.warning(f"Failed to decode {path}: {e}")
     except Exception as e:
-        # Catch-all for unexpected errors
-        logger.warning(f"Failed to fetch content for {path}: {str(e)}")
-        return None
-
-
-async def fetch_repo_contents(url: str) -> List[Dict[str, Any]]:
-    """
-    Fetch repository contents from GitHub with comprehensive error handling.
+        logger.warning(f"Failed to fetch {path}: {e}")
     
-    Args:
-        url: GitHub repository URL
-        
-    Returns:
-        List of dictionaries containing file paths and contents
-        
-    Raises:
-        ValueError: If URL is invalid or repository is empty
-        PermissionError: If access is denied or rate limited
-        TimeoutError: If request times out
-        ConnectionError: If network error occurs
+    return None
+
+
+async def fetch_repo_data(url: str) -> Dict[str, Any]:
     """
-    # Parse GitHub URL with validation
+    Fetch repository data with smart file selection based on repo type detection.
+    
+    Returns:
+        {
+            "owner": str,
+            "repo": str,
+            "description": str,
+            "stars": int,
+            "language": str,
+            "files": [{"path": str, "content": str, "priority": int, "category": str}],
+            "file_count": int,
+            "repo_type": dict  # Detection results
+        }
+    """
+    # Parse GitHub URL
     try:
         owner, repo = parse_github_url(url)
     except ValueError as e:
-        logger.error(f"Invalid GitHub URL: {str(e)}")
-        raise
+        raise ValueError(str(e))
     
-    logger.info(f"Fetching contents for {owner}/{repo}")
+    # Check cache first
+    cache_key = f"{owner}/{repo}"
+    if cache_key in _repo_cache:
+        logger.info(f"Returning cached data for {cache_key}")
+        return _repo_cache[cache_key]
+    
+    logger.info(f"Fetching repository data for {owner}/{repo}")
+    
+    # Set up headers
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "DevOnboard-App"
+    }
+    
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+        logger.info("Using GitHub token for authentication")
+    else:
+        logger.warning("No GitHub token found - rate limits will be lower")
     
     try:
-        # Create async HTTP client with timeout
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            # Step 1: Fetch repository tree (list of all files)
+            # Step 1: Get repository metadata
+            repo_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+            
             try:
-                tree = await fetch_repo_tree(owner, repo, client)
-            except (ValueError, PermissionError, TimeoutError, ConnectionError) as e:
-                logger.error(f"Failed to fetch repository tree: {str(e)}")
-                raise
+                response = await client.get(repo_url, headers=headers)
+            except (httpx.ConnectError, httpx.TimeoutException):
+                raise ConnectionError("Cannot reach GitHub API. Check your internet connection")
             
-            # Validate tree is a non-empty list
-            if not tree or not isinstance(tree, list):
-                raise ValueError(f"Repository {owner}/{repo} appears to be empty or inaccessible")
+            # Handle HTTP errors
+            if response.status_code == 401:
+                raise PermissionError("Invalid GitHub token. Check your GITHUB_TOKEN in .env")
+            elif response.status_code == 403:
+                raise PermissionError("GitHub API rate limit exceeded. Add a GITHUB_TOKEN to .env")
+            elif response.status_code == 404:
+                raise ValueError("Repository not found. Check the URL and make sure it is public")
             
-            # Step 2: Filter files with validation
-            files = []
-            seen_paths = set()  # Track duplicates (shouldn't happen but defensive)
+            response.raise_for_status()
+            repo_data = response.json()
+            
+            # Extract repository metadata
+            description = repo_data.get("description", "")
+            stars = repo_data.get("stargazers_count", 0)
+            language = repo_data.get("language", "")
+            default_branch = repo_data.get("default_branch", "main")
+            
+            # Step 2: Get repository file tree
+            tree_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{default_branch}?recursive=1"
+            
+            try:
+                response = await client.get(tree_url, headers=headers)
+            except (httpx.ConnectError, httpx.TimeoutException):
+                raise ConnectionError("Cannot reach GitHub API. Check your internet connection")
+            
+            if response.status_code == 401:
+                raise PermissionError("Invalid GitHub token. Check your GITHUB_TOKEN in .env")
+            elif response.status_code == 403:
+                raise PermissionError("GitHub API rate limit exceeded. Add a GITHUB_TOKEN to .env")
+            elif response.status_code == 404:
+                raise ValueError("Repository not found. Check the URL and make sure it is public")
+            
+            response.raise_for_status()
+            tree_data = response.json()
+            
+            tree = tree_data.get("tree", [])
+            
+            if not tree:
+                raise ValueError("Repository appears to be empty")
+            
+            # Step 3: Detect repo type
+            all_paths = [item.get("path", "") for item in tree if item.get("type") == "blob"]
+            repo_type = detect_repo_type(all_paths)
+            
+            logger.info(f"Detected: {repo_type['language']}, {repo_type['framework']}, "
+                       f"auth={repo_type['has_auth']}, db={repo_type['has_database']}")
+            
+            # Step 4: Smart file selection
+            files_to_fetch = []
+            file_count = 0
+            
+            # Priority 1 - Config files (always fetch)
+            config_files = [
+                "README.md", "README.rst", "package.json", "requirements.txt",
+                "setup.py", "setup.cfg", "pyproject.toml", "pom.xml",
+                "build.gradle", "Cargo.toml", "go.mod", "composer.json",
+                "Gemfile", ".env.example", "docker-compose.yml", "Dockerfile"
+            ]
             
             for item in tree:
-                # Skip invalid items
-                if not item or not isinstance(item, dict):
-                    continue
-                
-                # Only process blob (file) types, skip trees (directories)
                 if item.get("type") != "blob":
                     continue
                 
-                # Extract and validate path
+                file_count += 1
                 path = item.get("path", "")
-                if not path or not isinstance(path, str):
-                    continue
-                
-                # Skip duplicates (defensive programming)
-                if path in seen_paths:
-                    logger.warning(f"Duplicate path in tree: {path}")
-                    continue
-                seen_paths.add(path)
-                
-                # Apply skip filters (node_modules, .git, binaries, etc.)
-                if should_skip_file(path):
-                    continue
-                
-                # Validate size is a valid number
                 size = item.get("size", 0)
-                if not isinstance(size, (int, float)) or size < 0:
-                    logger.warning(f"Invalid size for {path}: {size}")
-                    continue
+                filename = path.split("/")[-1]
+                path_lower = path.lower()
                 
-                # Skip files that are too large
-                if size > MAX_FILE_SIZE:
-                    logger.info(f"Skipping large file: {path} ({size} bytes)")
-                    continue
-                
-                # Add file to list
-                files.append({
-                    "path": path,
-                    "size": size,
-                    "sha": item.get("sha", "")  # Git SHA hash
-                })
-            
-            # Validate we have at least some files
-            if not files:
-                raise ValueError(f"No valid files found in repository {owner}/{repo}")
-            
-            # Check for very large repositories and limit if needed
-            if len(files) > MAX_FILES:
-                logger.warning(f"Repository has {len(files)} files, limiting to {MAX_FILES}")
-                # Sort by path and limit to prevent memory exhaustion
-                files.sort(key=lambda x: x["path"])
-                files = files[:MAX_FILES]
-            else:
-                # Sort by path for consistent ordering
-                files.sort(key=lambda x: x["path"])
-            
-            logger.info(f"Processing {len(files)} files from {owner}/{repo}")
-            
-            # Step 3: Fetch content for each file with progress tracking
-            result = []
-            failed_count = 0
-            
-            for i, file_info in enumerate(files):
-                try:
-                    # Fetch individual file content
-                    content = await fetch_file_content(owner, repo, file_info["path"], client)
-                    
-                    # Add file with content to result
-                    result.append({
-                        "path": file_info["path"],
-                        "content": content if content is not None else "",  # Empty string if fetch failed
-                        "size": file_info["size"],
-                        "sha": file_info["sha"]
-                    })
-                    
-                    # Log progress for large repos (every 10 files)
-                    if (i + 1) % 10 == 0:
-                        logger.info(f"Processed {i + 1}/{len(files)} files")
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to fetch content for {file_info['path']}: {str(e)}")
-                    failed_count += 1
-                    # Add file with empty content rather than failing completely
-                    # This allows partial success for large repos
-                    result.append({
-                        "path": file_info["path"],
-                        "content": "",
-                        "size": file_info["size"],
-                        "sha": file_info["sha"]
+                if filename in config_files:
+                    files_to_fetch.append({
+                        "path": path, "size": size, "priority": 1, "category": "config"
                     })
             
-            # Log warning if some files failed
-            if failed_count > 0:
-                logger.warning(f"Failed to fetch content for {failed_count} files")
+            # Priority 2 - Entry points
+            entry_points = {
+                "index.js": "entry", "index.ts": "entry", "app.js": "entry",
+                "app.ts": "entry", "server.js": "entry", "server.ts": "entry",
+                "main.js": "entry", "main.ts": "entry", "main.py": "entry",
+                "app.py": "entry", "server.py": "entry", "wsgi.py": "entry",
+                "asgi.py": "entry", "Main.java": "entry", "Application.java": "entry",
+                "main.go": "entry"
+            }
             
-            # Validate we got at least some results
-            if not result:
-                raise ValueError(f"Failed to fetch any file contents from {owner}/{repo}")
+            for item in tree:
+                if item.get("type") != "blob":
+                    continue
+                path = item.get("path", "")
+                size = item.get("size", 0)
+                filename = path.split("/")[-1]
+                
+                if filename in entry_points and not any(f["path"] == path for f in files_to_fetch):
+                    files_to_fetch.append({
+                        "path": path, "size": size, "priority": 2, "category": entry_points[filename]
+                    })
+                    break  # Only first match
             
-            logger.info(f"Successfully fetched {len(result)} files from {owner}/{repo}")
+            # Priority 3 - Based on detected repo type
+            for item in tree:
+                if item.get("type") != "blob":
+                    continue
+                path = item.get("path", "")
+                size = item.get("size", 0)
+                path_lower = path.lower()
+                
+                if any(f["path"] == path for f in files_to_fetch):
+                    continue
+                
+                # Auth files
+                if repo_type['has_auth'] and any(kw in path_lower for kw in [
+                    'auth', 'login', 'jwt', 'passport', 'middleware',
+                    'guard', 'permission', 'session', 'oauth', 'token'
+                ]):
+                    files_to_fetch.append({
+                        "path": path, "size": size, "priority": 3, "category": "auth"
+                    })
+                
+                # Database/Model files
+                elif repo_type['has_database'] and any(kw in path_lower for kw in [
+                    'model', 'schema', 'entity', 'migration', 'repository', 'dao'
+                ]):
+                    files_to_fetch.append({
+                        "path": path, "size": size, "priority": 3, "category": "database"
+                    })
+                
+                # Route files
+                elif repo_type['has_backend'] and any(kw in path_lower for kw in [
+                    'route', 'router', 'controller', 'handler', 'endpoint', 'api', 'view'
+                ]):
+                    files_to_fetch.append({
+                        "path": path, "size": size, "priority": 3, "category": "route"
+                    })
+                
+                # Component files
+                elif repo_type['has_frontend'] and any(kw in path_lower for kw in [
+                    'page', 'component', 'screen', 'layout', 'store', 'context', 'hook'
+                ]):
+                    files_to_fetch.append({
+                        "path": path, "size": size, "priority": 3, "category": "component"
+                    })
+            
+            # Priority 4 - Fill remaining slots (up to 40 total)
+            exclude_patterns = ['test', 'spec', '__test__', '.test.', 'dist/', 
+                              'build/', 'node_modules', '__pycache__', '.git']
+            
+            for item in tree:
+                if len(files_to_fetch) >= 40:
+                    break
+                
+                if item.get("type") != "blob":
+                    continue
+                
+                path = item.get("path", "")
+                size = item.get("size", 0)
+                path_lower = path.lower()
+                
+                if any(f["path"] == path for f in files_to_fetch):
+                    continue
+                
+                # Skip excluded patterns
+                if any(ex in path_lower for ex in exclude_patterns):
+                    continue
+                
+                # Prefer files in root, src/, app/, lib/
+                folder = path.split("/")[0] if "/" in path else ""
+                if folder in ["", "src", "app", "lib"] or "/" not in path:
+                    files_to_fetch.append({
+                        "path": path, "size": size, "priority": 4, "category": "other"
+                    })
+            
+            logger.info(f"Selected {len(files_to_fetch)} files to fetch (out of {file_count} total)")
+            
+            # Step 5: Fetch all files in parallel
+            fetch_tasks = [
+                _fetch_single_file(
+                    client, owner, repo,
+                    f["path"], headers, f["size"], f["priority"], f["category"]
+                )
+                for f in files_to_fetch
+            ]
+            
+            results = await asyncio.gather(*fetch_tasks, return_exceptions=False)
+            files = [r for r in results if r is not None]
+            
+            logger.info(f"Successfully fetched {len(files)} files with full content")
+            
+            # Prepare result
+            result = {
+                "owner": owner,
+                "repo": repo,
+                "description": description,
+                "stars": stars,
+                "language": language,
+                "files": files,
+                "file_count": file_count,
+                "repo_type": repo_type
+            }
+            
+            # Cache the result
+            _repo_cache[cache_key] = result
+            
             return result
             
-    except httpx.TimeoutException:
-        # Handle timeout errors
-        raise TimeoutError(f"Request timed out while fetching repository contents")
-    except httpx.ConnectError as e:
-        # Handle connection errors
-        raise ConnectionError(f"Failed to connect to GitHub API: {str(e)}")
-    except (ValueError, PermissionError, TimeoutError, ConnectionError):
-        # Re-raise these as-is (already properly formatted)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        raise ConnectionError("Cannot reach GitHub API. Check your internet connection")
+    except (ValueError, PermissionError, ConnectionError):
         raise
     except Exception as e:
-        # Catch-all for unexpected errors
-        logger.error(f"Unexpected error fetching repository contents: {str(e)}", exc_info=True)
-        raise ConnectionError(f"Failed to fetch repository contents: {str(e)}")
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        raise ConnectionError(f"Failed to fetch repository data: {str(e)}")
+
 
 # Made with Bob

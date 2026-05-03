@@ -1,25 +1,34 @@
 """
 FastAPI application for GitHub repository analysis.
 """
+from dotenv import load_dotenv
+from pathlib import Path
+load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
+import os
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl, field_validator
 from typing import Dict, Any, Optional
 import logging
-import os
 import re
 
 # Import custom modules for GitHub API interaction and documentation generation
-from github_client import fetch_repo_contents
+from github_client import fetch_repo_data
 from doc_generator import generate_onboarding_doc
 from orchestrate_agent import answer_question
+import watsonx_client
 
 # Configure logging to track application behavior and errors
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Module-level variable to store the last generated onboarding document
-_last_onboarding_doc: Optional[str] = None
+# Module-level variables to store the last generated onboarding document, raw files, and metadata
+last_onboarding_doc: str = ""
+last_repo_files: list = []
+last_repo_metadata: dict = {}
+last_repo_owner: str = ""
+last_repo_name: str = ""
 
 # Initialize FastAPI application with metadata
 app = FastAPI(
@@ -110,9 +119,11 @@ class AnalyzeResponse(BaseModel):
     Attributes:
         onboarding_doc: Generated markdown documentation for the repository
         file_count: Total number of files analyzed in the repository
+        metadata: Structured metadata about the analyzed repository
     """
     onboarding_doc: str
     file_count: int
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class AskRequest(BaseModel):
@@ -162,12 +173,16 @@ class AskResponse(BaseModel):
     
     Attributes:
         answer: AI-generated answer to the question
-        confidence: Confidence score of the answer (0-1)
         sources: List of sources used for the answer
+        powered_by: AI model information
+        files_searched: Number of files searched
+        files_matched: Number of files matched
     """
     answer: str
-    confidence: float
     sources: list[str]
+    powered_by: Optional[str] = None
+    files_searched: Optional[int] = None
+    files_matched: Optional[int] = None
 
 
 @app.get("/")
@@ -185,15 +200,34 @@ async def root() -> Dict[str, str]:
     }
 
 
+@app.get("/watsonx-status")
+async def watsonx_status():
+    configured = watsonx_client.is_configured()
+    return {
+        "watsonx_connected": configured,
+        "model": watsonx_client.get_model_id(),
+        "region": watsonx_client.get_url(),
+        "project_id": watsonx_client.get_project_id_preview(),
+        "cache_entries": watsonx_client.get_cache_size(),
+        "ibm_bob_built": True,
+        "status": "ready" if configured else "not configured"
+    }
+
+
 @app.get("/health")
-async def health_check() -> Dict[str, str]:
-    """
-    Health check endpoint for monitoring and load balancers.
-    
-    Returns:
-        Dict[str, str]: Status indicating the API is healthy and operational
-    """
-    return {"status": "healthy"}
+async def health():
+    configured = watsonx_client.is_configured()
+    return {
+        "status": "running",
+        "watsonx_orchestrate_compatible": True,
+        "ibm_bob_built": True,
+        "version": "1.0.0",
+        "services": {
+            "github_api": True,
+            "watsonx_ai": configured,
+            "model": watsonx_client.get_model_id()
+        }
+    }
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -210,101 +244,90 @@ async def analyze_repository(request: AnalyzeRequest) -> AnalyzeResponse:
     Raises:
         HTTPException: If the repository cannot be accessed or analyzed
     """
-    global _last_onboarding_doc
+    global last_onboarding_doc, last_repo_files, last_repo_metadata, last_repo_owner, last_repo_name
+    
+    # Clear watsonx cache for fresh analysis
+    watsonx_client.clear_cache()
     
     try:
         # Log the start of repository analysis
         logger.info(f"Analyzing repository: {request.github_url}")
         
-        # Fetch repository contents with timeout handling
+        # Fetch repository data from GitHub
         try:
-            # Call GitHub client to fetch all repository files
-            files = await fetch_repo_contents(request.github_url)
-        except TimeoutError:
-            # Handle timeout errors specifically (GitHub API took too long)
-            logger.error("Request timeout while fetching repository")
-            raise HTTPException(
-                status_code=504,
-                detail="Request timeout: GitHub API took too long to respond. Please try again."
-            )
+            repo_data = await fetch_repo_data(request.github_url)
+        except ValueError as e:
+            # Invalid URL or repository not found
+            error_msg = str(e)
+            logger.error(f"ValueError: {error_msg}")
+            print(f"ERROR: {error_msg}")  # Print to terminal for debugging
+            if "not found" in error_msg.lower():
+                raise HTTPException(status_code=404, detail=error_msg)
+            else:
+                raise HTTPException(status_code=400, detail=error_msg)
+        except PermissionError as e:
+            # Rate limit or authentication issues
+            error_msg = str(e)
+            logger.error(f"PermissionError: {error_msg}")
+            print(f"ERROR: {error_msg}")  # Print to terminal for debugging
+            if "rate limit" in error_msg.lower():
+                raise HTTPException(status_code=429, detail=error_msg)
+            else:
+                raise HTTPException(status_code=403, detail=error_msg)
+        except ConnectionError as e:
+            # Network connectivity issues
+            error_msg = str(e)
+            logger.error(f"ConnectionError: {error_msg}")
+            print(f"ERROR: {error_msg}")  # Print to terminal for debugging
+            raise HTTPException(status_code=503, detail=error_msg)
         
-        # Validate files list is not empty
-        if not files or len(files) == 0:
-            # Repository exists but has no accessible files
-            raise HTTPException(
-                status_code=404,
-                detail="No files found or repository is empty"
-            )
+        # Extract files from repo_data
+        files = repo_data.get("files", [])
+        file_count = repo_data.get("file_count", 0)
         
-        logger.info(f"Successfully fetched {len(files)} files")
+        logger.info(f"Successfully fetched repository data: {file_count} total files, {len(files)} priority files")
         
-        # Generate onboarding documentation with error handling
+        # Generate onboarding documentation
         try:
-            # Call documentation generator to create markdown documentation
-            onboarding_doc = generate_onboarding_doc(files)
+            # Pass the full repo_data dict to the doc generator
+            onboarding_doc, metadata = generate_onboarding_doc(repo_data)
             
             # Validate generated documentation is not empty
             if not onboarding_doc or not onboarding_doc.strip():
                 raise ValueError("Generated documentation is empty")
             
-            # Store the generated documentation for use by /ask endpoint
-            _last_onboarding_doc = onboarding_doc
+            # Store the generated documentation, raw files, and metadata for use by /ask endpoint
+            last_onboarding_doc = onboarding_doc
+            last_repo_files = files
+            last_repo_metadata = metadata
+            last_repo_owner = repo_data.get('owner', '')
+            last_repo_name = repo_data.get('repo', '')
                 
         except Exception as doc_error:
             # Handle any errors during documentation generation
-            logger.error(f"Error generating documentation: {str(doc_error)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to generate documentation: {str(doc_error)}"
-            )
+            error_msg = f"Failed to generate documentation: {str(doc_error)}"
+            logger.error(error_msg)
+            print(f"ERROR: {error_msg}")  # Print to terminal for debugging
+            raise HTTPException(status_code=500, detail=error_msg)
         
-        logger.info("Generated onboarding documentation")
+        logger.info("Generated onboarding documentation with metadata")
         
-        # Return successful response with documentation and file count
+        # Return successful response with documentation, file count, and metadata
         return AnalyzeResponse(
             onboarding_doc=onboarding_doc,
-            file_count=len(files)
+            file_count=file_count,
+            metadata=metadata
         )
         
     except HTTPException:
         # Re-raise HTTP exceptions as-is (already properly formatted)
         raise
-    except ValueError as e:
-        # Handle invalid URL format errors
-        logger.error(f"Invalid URL: {str(e)}")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid GitHub URL: {str(e)}"
-        )
-    except PermissionError as e:
-        # Handle permission and rate limit errors
-        logger.error(f"Permission denied: {str(e)}")
-        # Check if it's a rate limit error (GitHub API has usage limits)
-        error_msg = str(e).lower()
-        if "rate limit" in error_msg or "429" in error_msg:
-            raise HTTPException(
-                status_code=429,
-                detail="GitHub API rate limit exceeded. Please try again later or provide a GitHub token."
-            )
-        # Generic permission error (private repo, etc.)
-        raise HTTPException(
-            status_code=403,
-            detail=f"Access denied: {str(e)}"
-        )
-    except ConnectionError as e:
-        # Handle network connectivity errors
-        logger.error(f"Network error: {str(e)}")
-        raise HTTPException(
-            status_code=503,
-            detail="Network error: Unable to connect to GitHub. Please check your connection and try again."
-        )
     except Exception as e:
         # Catch-all for unexpected errors
-        logger.error(f"Error analyzing repository: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to analyze repository: {str(e)}"
-        )
+        error_msg = f"Unexpected error: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        print(f"ERROR: {error_msg}")  # Print to terminal for debugging
+        raise HTTPException(status_code=500, detail=f"Failed to analyze repository: {str(e)}")
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -321,27 +344,29 @@ async def ask_question(request: AskRequest) -> AskResponse:
     Raises:
         HTTPException: If the question cannot be answered or no repository has been analyzed
     """
-    global _last_onboarding_doc
+    global last_onboarding_doc, last_repo_files, last_repo_metadata
     
     try:
         logger.info(f"Processing question: {request.question[:100]}...")
         
         # Check if we have a stored onboarding document
-        if not _last_onboarding_doc:
+        if not last_onboarding_doc:
             raise HTTPException(
                 status_code=400,
                 detail="No repository has been analyzed yet. Please analyze a repository first using the /analyze endpoint."
             )
         
-        # Call the orchestrate agent to answer the question using stored context
-        result = answer_question(request.question, _last_onboarding_doc)
+        # Call the orchestrate agent to answer the question using stored context and raw files
+        result = answer_question(request.question, last_onboarding_doc, last_repo_files)
         
         logger.info("Question answered successfully")
         
         return AskResponse(
             answer=result["answer"],
-            confidence=result["confidence"],
-            sources=result["sources"]
+            sources=result["sources"],
+            powered_by=result.get("powered_by"),
+            files_searched=result.get("files_searched"),
+            files_matched=result.get("files_matched")
         )
         
     except HTTPException:
