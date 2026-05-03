@@ -1,15 +1,15 @@
 # DevOnboard 🚀
 
-> Automatically generate comprehensive developer onboarding documentation for any GitHub repository
+> AI-powered developer onboarding for any GitHub repository in under 60 seconds
 
-[![IBM Hackathon](https://img.shields.io/badge/IBM-Hackathon-blue)](https://ibm.com)
+[![IBM Bob Hackathon](https://img.shields.io/badge/IBM_Bob-Hackathon_2026-blue)](https://ibm.com)
+[![IBM watsonx.ai](https://img.shields.io/badge/IBM-watsonx.ai-purple)](https://www.ibm.com/watsonx)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-18+-blue)](https://react.dev)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5+-blue)](https://www.typescriptlang.org)
 
 ## Overview
 
-**DevOnboard** helps developers quickly understand and onboard to new GitHub repositories by automatically analyzing the codebase and generating comprehensive onboarding documentation.
+**DevOnboard** revolutionizes developer onboarding by automatically analyzing GitHub repositories and generating comprehensive onboarding documentation powered by **IBM watsonx.ai**. Built entirely with **IBM Bob**, it transforms days of manual exploration into minutes of AI-guided understanding.
 
 ### What It Does
 
@@ -19,6 +19,8 @@ Simply provide a GitHub repository URL, and DevOnboard will:
 2. 🎯 **Identify the top 10 most important files** - Know where to focus your attention
 3. 🔄 **Map the data flow** - Understand how information moves through the system
 4. 📝 **Generate a step-by-step feature guide** - Learn how to add new features
+5. 🤖 **AI Insights powered by watsonx.ai** - Get intelligent observations using Llama 70B
+6. 💬 **Interactive Q&A** - Ask follow-up questions and get AI-powered answers
 
 ### Perfect For
 
@@ -30,43 +32,50 @@ Simply provide a GitHub repository URL, and DevOnboard will:
 
 ## Features
 
-### Current Features (v1.0)
+### Current Features (v1.0 - Hackathon Demo)
 
 - ✅ GitHub repository analysis via REST API
 - ✅ Intelligent file importance scoring
 - ✅ Architecture pattern detection
 - ✅ Data flow visualization
 - ✅ Feature addition guide generation
+- ✅ **AI Insights powered by IBM watsonx.ai (Llama 70B)**
+- ✅ **Interactive Q&A with AI-powered answers**
 - ✅ Clean, responsive React UI
 - ✅ Support for multiple programming languages
-- ✅ Error handling and validation
+- ✅ Comprehensive error handling and validation
+- ✅ **62 comprehensive unit tests**
+- ✅ **Built entirely with IBM Bob**
 
-### Coming Soon
+### Coming Soon (Post-Hackathon)
 
-- 🤖 AI-powered intelligent summaries (GPT-4/Claude integration)
-- 📊 Dependency graph visualization
+- 📊 Interactive dependency graph visualization
 - 🔒 Security vulnerability scanning
-- 📈 Code quality metrics
+- 📈 Code quality metrics and recommendations
 - 💾 Save and share analysis results
 - 🔄 Compare repository versions
+- 👥 Team collaboration features
+- 🔌 IDE extensions (VS Code, JetBrains)
 
 ## Tech Stack
+
+### Core Technologies
+- **IBM Bob**: Complete development environment (Plan + Code modes)
+- **IBM watsonx.ai**: AI inference using meta-llama/llama-3-3-70b-instruct
+- **GitHub REST API**: Repository data fetching
 
 ### Backend
 - **Framework**: FastAPI (Python 3.10+)
 - **API Client**: httpx for async GitHub API calls
 - **Validation**: Pydantic for data models
 - **Server**: Uvicorn ASGI server
+- **Testing**: pytest with 62 comprehensive tests
 
 ### Frontend
-- **Framework**: React 18 with TypeScript
+- **Framework**: React 18
 - **Build Tool**: Vite
-- **Styling**: Tailwind CSS
-- **HTTP Client**: Axios
-- **Markdown**: react-markdown
-
-### External APIs
-- **GitHub REST API**: Repository data fetching
+- **Styling**: Plain CSS (minimal, clean design)
+- **Markdown**: Custom markdown renderer
 
 ## Quick Start
 
@@ -75,6 +84,7 @@ Simply provide a GitHub repository URL, and DevOnboard will:
 - Python 3.10 or higher
 - Node.js 18 or higher
 - GitHub personal access token ([Create one here](https://github.com/settings/tokens))
+- IBM watsonx.ai API credentials ([Get started here](https://www.ibm.com/watsonx))
 
 ### Installation
 
@@ -97,9 +107,10 @@ Simply provide a GitHub repository URL, and DevOnboard will:
    
    pip install -r requirements.txt
    
-   # Create .env file
-   cp .env.example .env
-   # Edit .env and add your configuration
+   # Create .env file with your credentials
+   echo GITHUB_TOKEN=your_github_token_here > .env
+   echo WATSONX_API_KEY=your_watsonx_api_key_here >> .env
+   echo WATSONX_PROJECT_ID=your_project_id_here >> .env
    ```
 
 3. **Set up the frontend**
@@ -118,7 +129,7 @@ Simply provide a GitHub repository URL, and DevOnboard will:
    ```bash
    cd backend
    source venv/bin/activate  # or venv\Scripts\activate on Windows
-   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
    ```
    
    Backend will be available at: `http://localhost:8000`
@@ -141,11 +152,11 @@ Simply provide a GitHub repository URL, and DevOnboard will:
 
 ### Basic Usage
 
-1. Open the application in your browser
+1. Open the application in your browser at `http://localhost:5173`
 2. Enter a GitHub repository URL (e.g., `https://github.com/fastapi/fastapi`)
-3. Provide your GitHub personal access token
-4. Click "Analyze Repository"
-5. View the generated onboarding document
+3. Click "Analyze Repository"
+4. View the generated onboarding document with AI insights
+5. Ask follow-up questions using the interactive Q&A feature
 
 ### GitHub Token Setup
 
@@ -160,86 +171,108 @@ To use DevOnboard, you need a GitHub personal access token:
 5. Click "Generate token"
 6. Copy the token and use it in the application
 
-**Security Note**: Your token is never stored by DevOnboard. It's only used to make API requests to GitHub and is kept in memory during your session.
+**Security Note**: Your GitHub token is stored in the backend `.env` file and used for API requests. Never commit your `.env` file to version control.
+
+### IBM watsonx.ai Setup
+
+1. Sign up for IBM watsonx.ai at [ibm.com/watsonx](https://www.ibm.com/watsonx)
+2. Create a new project and note your Project ID
+3. Generate an API key from your account settings
+4. Add credentials to backend `.env` file:
+   ```
+   WATSONX_API_KEY=your_api_key_here
+   WATSONX_PROJECT_ID=your_project_id_here
+   ```
 
 ## Project Structure
 
 ```
 devonboard/
 ├── backend/                    # FastAPI backend
-│   ├── app/
-│   │   ├── main.py            # Application entry point
-│   │   ├── config.py          # Configuration
-│   │   ├── models/            # Pydantic models
-│   │   ├── services/          # Business logic
-│   │   ├── api/               # API routes
-│   │   └── utils/             # Utility functions
-│   ├── tests/                 # Backend tests
+│   ├── main.py                # Application entry point
+│   ├── github_client.py       # GitHub API integration
+│   ├── doc_generator.py       # Documentation generation
+│   ├── watsonx_client.py      # IBM watsonx.ai integration
+│   ├── orchestrate_agent.py   # Analysis orchestration
+│   ├── test_watson.py         # watsonx.ai testing
+│   ├── tests/                 # 62 comprehensive unit tests
+│   │   ├── test_doc_generator.py
+│   │   └── test_github_client.py
 │   └── requirements.txt       # Python dependencies
 │
 ├── frontend/                   # React frontend
 │   ├── src/
-│   │   ├── components/        # React components
-│   │   ├── services/          # API client
-│   │   ├── types/             # TypeScript types
-│   │   ├── hooks/             # Custom hooks
-│   │   └── App.tsx            # Main component
+│   │   ├── App.jsx            # Main application (98 lines)
+│   │   ├── MarkdownRenderer.jsx  # Markdown rendering (54 lines)
+│   │   ├── App.css            # Styling
+│   │   └── main.jsx           # Entry point
 │   └── package.json           # Node dependencies
 │
-├── docs/                       # Documentation
+├── docs/                       # Comprehensive documentation
 │   ├── IMPLEMENTATION_PLAN.md # Detailed implementation guide
 │   ├── ARCHITECTURE_PLAN.md   # System architecture
-│   └── API_DOCUMENTATION.md   # API reference
+│   ├── PLANNING_SUMMARY.md    # Planning phase summary
+│   ├── QUICK_START_GUIDE.md   # Quick start guide
+│   ├── EDGE_CASES_FIXED.md    # Edge cases documentation
+│   └── FILE_STRUCTURE_CHECKLIST.md
 │
-└── README.md                   # This file
+├── bob-sessions/               # IBM Bob development sessions
+│   ├── bob_task_plan.md
+│   ├── bob_task_backend-creation.md
+│   ├── bob_task_IBM-watsonx.ai-Integration.md
+│   ├── bob_task_frontend_development.md
+│   └── ... (14+ detailed session logs)
+│
+├── README.md                   # This file
+└── SUBMISSION.md               # Hackathon submission details
 ```
 
 ## API Documentation
 
 ### Endpoints
 
-#### POST /api/v1/analyze
-Analyze a GitHub repository and generate onboarding documentation.
+#### POST /analyze
+Analyze a GitHub repository and generate onboarding documentation with AI insights.
 
 **Request:**
 ```json
 {
-  "repository_url": "https://github.com/owner/repo",
-  "github_token": "ghp_xxxxxxxxxxxxx",
-  "options": {
-    "include_readme": true,
-    "max_files_to_analyze": 100,
-    "file_size_limit_kb": 500
-  }
+  "repo_url": "https://github.com/owner/repo"
 }
 ```
 
 **Response:**
 ```json
 {
-  "repository": {
-    "name": "repo-name",
-    "owner": "owner-name",
-    "description": "Repository description",
-    "language": "Python",
-    "stars": 1234,
-    "forks": 56
-  },
-  "analysis": {
-    "architecture_summary": { ... },
-    "important_files": [ ... ],
-    "data_flow": { ... },
-    "feature_guide": { ... }
-  },
+  "markdown": "# Repository Analysis\n\n## Architecture Summary\n...",
   "metadata": {
-    "analyzed_at": "2026-05-02T16:30:00Z",
-    "total_files": 45,
-    "analyzed_files": 38
+    "repo_name": "repo",
+    "owner": "owner",
+    "analyzed_at": "2026-05-03T11:30:00Z"
   }
 }
 ```
 
-For complete API documentation, see [`docs/API_DOCUMENTATION.md`](docs/API_DOCUMENTATION.md) or visit `http://localhost:8000/docs` when running the backend.
+#### POST /ask
+Ask follow-up questions about the analyzed repository using AI.
+
+**Request:**
+```json
+{
+  "repo_url": "https://github.com/owner/repo",
+  "question": "How does authentication work in this project?"
+}
+```
+
+**Response:**
+```json
+{
+  "answer": "Based on the repository analysis, authentication is implemented using...",
+  "context_used": true
+}
+```
+
+For complete API documentation, visit `http://localhost:8000/docs` when running the backend.
 
 ## How It Works
 
@@ -277,17 +310,18 @@ Identifies key components:
 
 ### Running Tests
 
-**Backend:**
+**Backend (62 comprehensive tests):**
 ```bash
 cd backend
-pytest
+pytest tests/ -v
 ```
 
-**Frontend:**
-```bash
-cd frontend
-npm test
-```
+**Test Coverage:**
+- 31 tests for `doc_generator.py`
+- 31 tests for `github_client.py`
+- All tests passing ✅
+- Mocked GitHub API calls (no real API usage)
+- Comprehensive edge case coverage
 
 ### Code Style
 
@@ -381,24 +415,38 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-- Built for the IBM Hackathon 2026
-- Powered by [FastAPI](https://fastapi.tiangolo.com/)
-- UI built with [React](https://react.dev/)
-- Styled with [Tailwind CSS](https://tailwindcss.com/)
-- Data from [GitHub REST API](https://docs.github.com/en/rest)
+- **Built entirely with IBM Bob** - Plan mode + Code mode
+- **Powered by IBM watsonx.ai** - Llama 70B for AI insights
+- **Created for IBM Bob Hackathon 2026**
+- Backend: [FastAPI](https://fastapi.tiangolo.com/)
+- Frontend: [React](https://react.dev/)
+- Data source: [GitHub REST API](https://docs.github.com/en/rest)
+
+## IBM Bob Development Journey
+
+This entire project was built using IBM Bob across multiple development sessions:
+
+1. **Planning Phase** - Architecture and implementation planning
+2. **Backend Development** - FastAPI setup, GitHub integration, watsonx.ai integration
+3. **Frontend Development** - React UI with minimal, clean design
+4. **Testing** - Comprehensive pytest suite with 62 tests
+5. **Documentation** - Complete documentation generation
+6. **Refinement** - Edge case handling and performance optimization
+
+See `bob-sessions/` directory for detailed session logs.
 
 ## Support
 
-- 📧 Email: support@devonboard.dev
 - 🐛 Issues: [GitHub Issues](https://github.com/yourusername/devonboard/issues)
 - 💬 Discussions: [GitHub Discussions](https://github.com/yourusername/devonboard/discussions)
-
-## Authors
-
-- Your Name - [@yourhandle](https://github.com/yourhandle)
+- 📖 Documentation: See `docs/` directory
 
 ---
 
-**Made with ❤️ for developers, by developers**
+**Made with ❤️ using IBM Bob and IBM watsonx.ai**
 
-*Simplifying codebase onboarding, one repository at a time.*
+*Transforming developer onboarding from days to minutes.*
+
+---
+
+**See [SUBMISSION.md](SUBMISSION.md) for complete hackathon submission details.**
